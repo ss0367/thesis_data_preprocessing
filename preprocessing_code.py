@@ -9,36 +9,7 @@ OUTPUT_FILE = "preqin_company_sequences_markov_ready.xlsx"
 # 1. Stage mapping helpers ----------------------------------------------------
 
 def classify_raw_stage(raw_stage: str):
-    """
-    Classify the raw Preqin STAGE string into:
-        - canonical funding stage in {Seed, Series A, ..., Series E}
-        - or 'Exit'
-        - or None (no informative stage label)
-
-    Rules (per our discussion):
-
-    Exit events:
-        - Merger
-        - Pre-IPO
-        - PIPE
-
-    Canonical funding stages:
-        - Seed
-        - Series A
-        - Series B
-        - Series C
-        - Series D
-        - Series E  (catch-all late stage, incl. F–I and some others)
-
-    Mapped to Series E:
-        - Any of: Series E, Series F, Series G, Series H, Series I
-        - Secondary Stock Purchase
-        - Add-on
-        - Growth Capital/Expansion (and variants containing 'growth capital' and 'expansion')
-
-    Everything else (Angel, Grant, Venture Debt, Unspecified Round, etc.)
-    -> None, meaning "let the sequential logic assign the stage."
-    """
+   
     if pd.isna(raw_stage):
         return None
 
@@ -84,30 +55,7 @@ def classify_raw_stage(raw_stage: str):
 
 
 def assign_canonical_stages_and_exit(group: pd.DataFrame) -> pd.DataFrame:
-    """
-    For a single company's deals (already sorted by date and DEAL ID),
-    assign canonical risk stages consistent with the Markov model.
-
-    States:
-        Seed, Series A, Series B, Series C, Series D, Series E, Exit
-
-    Logic:
-        - Use Interpretation C for non-exit stages:
-            * First non-exit deal:
-                - If raw maps to Seed–E -> use that
-                - Else -> Seed
-            * Subsequent non-exit deals:
-                - Base rule: advance at most one step forward (capped at Series E)
-                - If raw maps to a canonical stage with index >= last_idx,
-                  override and jump forward (can skip, but never go back)
-                - If raw maps to stage with index < last_idx, ignore and just move forward
-
-        - Exit deals:
-            * If a row is classified as Exit:
-                - Assign canonical stage = 'Exit'
-                - Include this row
-                - DROP all subsequent rows for this company (truncate sequence)
-    """
+    
     stages_order = ["Seed", "Series A", "Series B", "Series C", "Series D", "Series E"]
     stage_to_idx = {s: i for i, s in enumerate(stages_order)}
     max_idx = len(stages_order) - 1
