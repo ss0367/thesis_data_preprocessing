@@ -1,11 +1,5 @@
 import pandas as pd
 
-# ---------------- CONFIG ----------------
-INPUT_FILE = "Preqin_deals_export-08_Dec_25cad878d2-38e1-4f10-93ae-077257ead3d1.xlsx"
-OUTPUT_FILE = "preqin_company_sequences_markov_ready.xlsx"
-# ----------------------------------------
-
-
 # 1. Stage mapping helpers ----------------------------------------------------
 
 def classify_raw_stage(raw_stage: str):
