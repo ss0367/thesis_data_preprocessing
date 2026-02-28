@@ -1,24 +1,25 @@
 import pandas as pd
+import numpy as np
 
-# 1. Stage mapping helpers ----------------------------------------------------
+# 1) Tokenization (raw label -> observation token)
 
-def classify_raw_stage(raw_stage: str):
+def tokenize_stage(raw_stage: str) -> str:
    
     if pd.isna(raw_stage):
-        return None
+        return "OTHER"
 
     s = str(raw_stage).strip().lower()
 
-    # ----- Exit events -----
+    # Exit-like observations
     if "merger" in s:
-        return "Exit"
+        return "EXITLIKE"
     if "pre-ipo" in s or "pre ipo" in s:
-        return "Exit"
-    if "pipe" in s:  # PIPE rounds
-        return "Exit"
+        return "EXITLIKE"
+    if "pipe" in s:
+        return "EXITLIKE"
 
-    # ----- Canonical non-exit funding stages -----
-    # Series letters (A–I). F–I all collapse to Series E.
+    # Canonical stage labels
+    
     if "series a" in s:
         return "Series A"
     if "series b" in s:
@@ -27,91 +28,46 @@ def classify_raw_stage(raw_stage: str):
         return "Series C"
     if "series d" in s:
         return "Series D"
-    if "series e" in s or "series f" in s or "series g" in s \
-       or "series h" in s or "series i" in s:
+
+    # Catch-all late stage token: Series E includes E/F/G/H/I + Growth/Expansion
+    if ("series e" in s or "series f" in s or "series g" in s or
+        "series h" in s or "series i" in s):
         return "Series E"
 
-    # Seed (as long as it isn't part of 'series ...')
+    # Seed
     if "seed" in s:
         return "Seed"
 
-    # Secondary Stock Purchase, Add-on, Growth Capital/Expansion -> Series E
-    if "secondary stock purchase" in s:
-        return "Series E"
+    # Financing mechanism / other labels (kept as observations, not states)
+    if "unspecified" in s:
+        return "UNSPEC"
+    if "venture debt" in s:
+        return "DEBT"
+    if "grant" in s:
+        return "GRANT"
+    if "angel" in s:
+        return "ANGEL"
     if "add-on" in s or "add on" in s:
-        return "Series E"
+        return "ADDON"
+    if "secondary stock purchase" in s:
+        return "SECONDARY"
+
+    # Growth/Expansion treated as late-stage observation
     if "growth capital" in s or "expansion" in s:
-        # Growth Capital/Expansion → treat as late stage
         return "Series E"
 
-    # Everything else -> None (no direct mapping; use sequential logic)
-    return None
+    return "OTHER"
 
 
-def assign_canonical_stages_and_exit(group: pd.DataFrame) -> pd.DataFrame:
-    
-    stages_order = ["Seed", "Series A", "Series B", "Series C", "Series D", "Series E"]
-    stage_to_idx = {s: i for i, s in enumerate(stages_order)}
-    max_idx = len(stages_order) - 1
+# 2) Preprocessing pipeline
 
-    assigned_stages = []
-    last_idx = None
-    exited = False
+def preprocess_preqin_to_long(
+    input_file: str = INPUT_FILE,
+    output_file: str = OUTPUT_FILE_LONG,
+) -> pd.DataFrame:
 
-    for _, row in group.iterrows():
-        if exited:
-            # We ignore any deals after the first exit event
-            continue
-
-        raw_stage = row["STAGE"]
-        mapped = classify_raw_stage(raw_stage)
-
-        if mapped == "Exit":
-            assigned_stages.append("Exit")
-            exited = True
-            continue
-
-        # Non-exit deal
-        if last_idx is None:
-            # First non-exit deal
-            if mapped is not None:
-                idx = stage_to_idx[mapped]
-            else:
-                idx = 0  # Seed
-        else:
-            # Base forward step from previous non-exit state
-            candidate_idx = min(last_idx + 1, max_idx)
-
-            if mapped is not None:
-                raw_idx = stage_to_idx[mapped]
-                if raw_idx >= last_idx:
-                    # Accept raw mapped stage (can jump forward)
-                    idx = min(raw_idx, max_idx)
-                else:
-                    # Raw suggests going backward -> ignore, just step forward
-                    idx = candidate_idx
-            else:
-                # No informative mapping -> follow sequential progression
-                idx = candidate_idx
-
-        assigned_stages.append(stages_order[idx])
-        last_idx = idx
-
-    # Build output group (only rows up to first Exit if any)
-    n = len(assigned_stages)
-    truncated = group.iloc[:n].copy()
-    truncated["CANONICAL_STAGE"] = assigned_stages
-    return truncated
-
-
-# 2. Main preprocessing pipeline ---------------------------------------------
-
-def main():
-    # 2.1 Load raw data
-    df_raw = pd.read_excel(INPUT_FILE)
-
-    # 2.2 Keep only relevant columns
-    cols_to_keep = [
+    # Columns used in your original notebook (same intent)
+    cols_keep = [
         "DEAL ID",
         "DEAL DATE",
         "STAGE",
@@ -120,65 +76,88 @@ def main():
         "DEAL SIZE (USD MN)",
         "COMPANY REVENUE (CURR. MN)",
     ]
-    df = df_raw[cols_to_keep].copy()
 
-    # 2.3 Deduplicate: one row per deal ID (since raw file repeats per investor)
-    df = df.drop_duplicates(subset=["DEAL ID"])
+    # Load raw data
+    raw = pd.read_excel(input_file)
 
-    # 2.4 Parse dates and sort by company + date + deal ID
+    # Keep needed columns (fail fast if missing)
+    missing = [c for c in cols_keep if c not in raw.columns]
+    if missing:
+        raise ValueError(f"Missing required columns in input file: {missing}")
+
+    df = raw[cols_keep].copy()
+
+    # Deduplicate investor-level repetition: one row per DEAL ID
+    df = df.drop_duplicates(subset=["DEAL ID"]).copy()
+
+    # Parse dates
     df["DEAL DATE"] = pd.to_datetime(df["DEAL DATE"], errors="coerce")
-    df = df.sort_values(["PORTFOLIO COMPANY ID", "DEAL DATE", "DEAL ID"])
 
-    # 2.5 Assign canonical stages and handle Exit/truncation per company
-    df_assigned = (
-        df.groupby("PORTFOLIO COMPANY ID", group_keys=False)
-          .apply(assign_canonical_stages_and_exit)
+    # Sort within company timeline
+    df = df.sort_values(
+        by=["PORTFOLIO COMPANY ID", "DEAL DATE", "DEAL ID"],
+        ascending=[True, True, True],
+        kind="mergesort",  # stable sort
     )
 
-    # 2.6 Assign deal_number = 1,2,3,... in chronological order (post-truncation)
-    df_assigned["deal_number"] = (
-        df_assigned.groupby("PORTFOLIO COMPANY ID").cumcount() + 1
+    # Create event index t (deal number within company)
+    df["t"] = df.groupby("PORTFOLIO COMPANY ID").cumcount() + 1
+
+    # Compute time gaps (days since previous deal in that company)
+    df["delta_days"] = (
+        df.groupby("PORTFOLIO COMPANY ID")["DEAL DATE"]
+          .diff()
+          .dt.days
     )
 
-    # 2.7 Set multi-index for pivoting
-    df_idx = df_assigned.set_index(
-        ["PORTFOLIO COMPANY", "PORTFOLIO COMPANY ID", "deal_number"]
+    # Tokenize raw labels into observation tokens
+    df["raw_stage"] = df["STAGE"]
+    df["obs_token"] = df["raw_stage"].apply(tokenize_stage)
+
+    # Deal size features for later HMM emissions
+    df["deal_size_usd_mn"] = pd.to_numeric(df["DEAL SIZE (USD MN)"], errors="coerce")
+    df["log_raise"] = np.log1p(df["deal_size_usd_mn"])
+
+    # Revenue (keep, numeric)
+    df["company_revenue_curr_mn"] = pd.to_numeric(
+        df["COMPANY REVENUE (CURR. MN)"], errors="coerce"
     )
 
-    # 2.8 Pivot to wide format: stage_k, deal_date_k, company_revenue_k, deal_size_usd_k
-    var_map = {
-        "CANONICAL_STAGE": "stage",
-        "DEAL DATE": "deal_date",
-        "COMPANY REVENUE (CURR. MN)": "company_revenue",
-        "DEAL SIZE (USD MN)": "deal_size_usd",
-    }
+    # Rename for clarity / consistency
+    df = df.rename(
+        columns={
+            "DEAL ID": "deal_id",
+            "DEAL DATE": "deal_date",
+            "PORTFOLIO COMPANY": "company_name",
+            "PORTFOLIO COMPANY ID": "company_id",
+        }
+    )
 
-    wide_parts = []
-    for col, prefix in var_map.items():
-        tmp = df_idx[col].unstack("deal_number")  # columns are 1,2,3,...
-        tmp.columns = [f"{prefix}_{int(c)}" for c in tmp.columns]
-        wide_parts.append(tmp)
+    # Final long-format schema (one row per deal)
+    out_cols = [
+        "company_id",
+        "company_name",
+        "t",
+        "deal_id",
+        "deal_date",
+        "raw_stage",
+        "obs_token",
+        "deal_size_usd_mn",
+        "log_raise",
+        "company_revenue_curr_mn",
+        "delta_days",
+    ]
+    out = df[out_cols].copy()
 
-    df_wide = pd.concat(wide_parts, axis=1).reset_index()
+    # Export
+    out.to_csv(output_file, index=False)
 
-    # 2.9 Reorder columns: company, company_id, then stage_1, date_1, revenue_1, size_1, ...
-    base_cols = ["PORTFOLIO COMPANY", "PORTFOLIO COMPANY ID"]
-    max_deals = df_assigned["deal_number"].max()
-
-    ordered_deal_cols = []
-    for k in range(1, max_deals + 1):
-        for prefix in ["stage", "deal_date", "company_revenue", "deal_size_usd"]:
-            col_name = f"{prefix}_{k}"
-            if col_name in df_wide.columns:
-                ordered_deal_cols.append(col_name)
-
-    final_cols = base_cols + ordered_deal_cols
-    df_final = df_wide[final_cols]
-
-    # 2.10 Export to Excel
-    df_final.to_excel(OUTPUT_FILE, index=False)
-    print(f"Done. Markov-ready company sequence table written to: {OUTPUT_FILE}")
+    return out
 
 
 if __name__ == "__main__":
-    main()
+    processed = preprocess_preqin_to_long(INPUT_FILE, OUTPUT_FILE_LONG)
+    print(f"Wrote LONG-format dataset to: {OUTPUT_FILE_LONG}")
+    print(f"Rows (deals): {len(processed):,}")
+    print("obs_token value counts (top 15):")
+    print(processed["obs_token"].value_counts().head(15))
